@@ -10,6 +10,8 @@ export const SINGLE_EVENT_PROP = new RegExp(
         'PGATOUR|LPGATOUR|DPWORLDTOUR|ATP|WTA|MATCH|GAME|TOTAL|SPREAD|PLAYERPROP|SCORE|' +
         'CHESSTOURNAMENT|TITLEDTUES|NBASTARTERS|BALLONDOR',
 );
+/** bellman fetch_census.py SKIP_FREQ: the census never read these series, so they were never tested. */
+export const SHORT_FREQUENCIES = new Set(['hourly', 'fifteen_min', 'daily']);
 /** common.archetype: any other strike type is a numeric ladder; a null strike is a field leg. */
 export function isFieldStrike(strikeType: string | null): boolean {
     return strikeType === null || strikeType === 'custom' || strikeType === 'structured';
@@ -42,6 +44,8 @@ export const SeriesRowSchema = z.object({
     title: z.string(),
     category: z.string(),
     fee_type: z.string().nullable(),
+    /** Null or absent is kept, as in the census. */
+    frequency: z.string().nullish(),
 });
 export type SeriesRow = z.infer<typeof SeriesRowSchema>;
 
@@ -68,6 +72,7 @@ export type PredicateExclusion =
     | 'mve'
     | 'numeric_ladder'
     | 'mentions'
+    | 'short_frequency'
     | 'contest'
     | 'single_event_prop'
     | 'few_legs'
@@ -98,7 +103,7 @@ function isLiveFieldLeg(m: MarketRow, dayStart: number): boolean {
 
 /**
  * The fine field predicate over subscribed legs (PRD 1.2): a non-numeric-ladder leg of a
- * ≥5-leg event outside Mentions, not a Sports contest or single-event prop (bellman
+ * ≥5-leg event outside Mentions and outside hourly/fifteen-minute/daily series, not a Sports contest or single-event prop (bellman
  * common.py), whose own close is ≥3 d and whose event close (max leg close) ≤ windowDays
  * after the basket day's 00:00Z. Every ticker gets either a leg or one exclusion reason.
  */
@@ -120,6 +125,7 @@ export function applyFieldPredicate(input: PredicateInput): PredicateResult {
             if (m.mve_collection_ticker !== null) return 'mve';
             if (!isFieldStrike(m.strike_type)) return 'numeric_ladder';
             if (s.category === 'Mentions') return 'mentions';
+            if (s.frequency && SHORT_FREQUENCIES.has(s.frequency)) return 'short_frequency';
             if (s.category === 'Sports' && SPORTS_CONTEST.test(`${s.ticker} ${s.title}`.toUpperCase())) return 'contest';
             if (s.category === 'Sports' && SINGLE_EVENT_PROP.test(m.event_ticker)) return 'single_event_prop';
             const siblings = eventLegs.get(m.event_ticker) ?? [m];
@@ -204,7 +210,7 @@ export async function loadEvents(client: SupabaseClient, eventTickers: string[])
 
 export async function loadSeries(client: SupabaseClient, seriesTickers: string[]): Promise<SeriesRow[]> {
     return selectIn(client, 'series', SeriesRowSchema, seriesTickers, (c, keys, from, to) =>
-        c.schema('kalshi_state').from('series').select('ticker, title, category, fee_type')
+        c.schema('kalshi_state').from('series').select('ticker, title, category, fee_type, frequency')
             .in('ticker', keys).order('ticker').range(from, to));
 }
 
@@ -246,7 +252,7 @@ const SAMPLE_SERIES_CHUNK = 50;
 /**
  * Dry-run-only candidate source for when sleeve S has no subscriptions: a capped sample of
  * active, non-MVE, field-strike legs closing in [3 d, windowDays] of the day start, reached
- * series(category, Sports contests skipped) → the newest 1,000 events (created ≤180 d ago) per
+ * series(category; Sports contests and short frequencies skipped) → the newest 1,000 events (created ≤180 d ago) per
  * 50 series → markets(event_ticker), all on indexes. The markets table is too bloated for a status/close scan inside the role
  * timeout. Not the coarse universe: no touch or volume filter (prices aren't stored yet).
  */
@@ -261,9 +267,10 @@ export async function sampleKalshiStateTickers(
     const out: string[] = [];
 
     for (const category of SAMPLE_CATEGORIES) {
-        const series = (await selectAll<{ ticker: string; title: string }>('series by category', (from, to) =>
-            client.schema('kalshi_state').from('series').select('ticker, title').eq('category', category).order('ticker').range(from, to)))
-            .filter((s) => !(category === 'Sports' && SPORTS_CONTEST.test(`${s.ticker} ${s.title}`.toUpperCase())));
+        const series = (await selectAll<{ ticker: string; title: string; frequency: string | null }>('series by category', (from, to) =>
+            client.schema('kalshi_state').from('series').select('ticker, title, frequency').eq('category', category).order('ticker').range(from, to)))
+            .filter((s) => !(category === 'Sports' && SPORTS_CONTEST.test(`${s.ticker} ${s.title}`.toUpperCase()))
+                && !(s.frequency && SHORT_FREQUENCIES.has(s.frequency)));
         let taken = 0;
         for (const seriesPart of chunk(series.map((s) => s.ticker), SAMPLE_SERIES_CHUNK)) {
             if (taken >= perCategory) break;

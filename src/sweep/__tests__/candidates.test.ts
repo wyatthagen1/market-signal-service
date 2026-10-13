@@ -10,7 +10,7 @@ const market = (ticker: string, event: string, over: Partial<MarketRow> = {}): M
 });
 
 function world(opts: {
-    category?: string; seriesTicker?: string; seriesTitle?: string; event?: string;
+    category?: string; seriesTicker?: string; seriesTitle?: string; event?: string; frequency?: string | null;
     legs?: Partial<MarketRow>[]; target?: Partial<MarketRow>; windowDays?: number;
 }): PredicateInput {
     const event = opts.event ?? 'KXNBATEAM-26LBJ';
@@ -18,7 +18,7 @@ function world(opts: {
     const target = market(`${event}-A`, event, opts.target);
     const siblings = (opts.legs ?? [{}, {}, {}, {}]).map((o, i) => market(`${event}-S${i}`, event, o));
     const events: EventRow[] = [{ event_ticker: event, series_ticker: seriesTicker, mutually_exclusive: true }];
-    const series: SeriesRow[] = [{ ticker: seriesTicker, title: opts.seriesTitle ?? 'Next team', category: opts.category ?? 'Sports', fee_type: 'quadratic' }];
+    const series: SeriesRow[] = [{ ticker: seriesTicker, title: opts.seriesTitle ?? 'Next team', category: opts.category ?? 'Sports', fee_type: 'quadratic', frequency: opts.frequency === undefined ? 'one_off' : opts.frequency }];
     return {
         tickers: [target.ticker],
         markets: new Map([target, ...siblings].map((m) => [m.ticker, m])),
@@ -73,6 +73,16 @@ describe('fine field predicate', () => {
         expect(verdict(world({ seriesTitle: 'Boxing bout winner' }))).toBe('contest');
         expect(verdict(world({ seriesTitle: 'Game of the year', category: 'Entertainment' }))).toBe('pass');
         expect(verdict(world({ category: 'Mentions' }))).toBe('mentions');
+    });
+
+    it('series the census skipped (hourly, fifteen_min, daily) are excluded; null and longer frequencies are kept', () => {
+        const dailyCrypto = { category: 'Crypto', seriesTicker: 'KXDOGED', seriesTitle: 'Dogecoin daily', event: 'KXDOGED-26OCT1617' };
+        for (const frequency of ['daily', 'hourly', 'fifteen_min']) {
+            expect(verdict(world({ ...dailyCrypto, frequency }))).toBe('short_frequency');
+        }
+        for (const frequency of [null, 'one_off', 'custom', 'annual', 'monthly', 'weekly', 'once', 'quarterly']) {
+            expect(verdict(world({ ...dailyCrypto, frequency }))).toBe('pass');
+        }
     });
 
     it('leg close ≥ 3 d after the day start, inclusive', () => {
