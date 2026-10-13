@@ -11,7 +11,8 @@
  * candidate ticker, standing in for the sync_status = 1 subscriptions.
  *
  * Out, per anchor: --predicate-only → candidate tickers; otherwise every candidate with its
- * features and rule decision, plus the predicate exclusion of every other ticker.
+ * features and rule decision, the predicate exclusion of every other ticker, and features and
+ * rule for excluded tickers that have tape (`extra`).
  */
 import { readFileSync, writeFileSync } from 'fs';
 import { gunzipSync } from 'zlib';
@@ -92,6 +93,11 @@ function main(): void {
                 return { ...leg, features, rule: applyRule(features) };
             }),
             excluded: Object.fromEntries(excluded),
+            // Tickers with tape that the predicate dropped: lets the research side be scored on the tested activity rule.
+            extra: Object.fromEntries([...excluded.keys()].filter((t) => prints.has(t)).map((t) => {
+                const features = computeFeatures(prints.get(t)!, at);
+                return [t, { features, rule: applyRule(features) }];
+            })),
         };
     }
     writeFileSync(output, JSON.stringify(out));
