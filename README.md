@@ -23,8 +23,23 @@ tables, and pushes a store to the trading fleet through the signal router.
 | `SUPABASE_SERVICE_ROLE_KEY` | `src/db/client.ts` |
 | `SIGNAL_ROUTER_URL` | `src/router/post-signal.ts` (POSTs to `$SIGNAL_ROUTER_URL/signals`) |
 | `SIGNAL_ROUTER_API_KEY` | `src/router/post-signal.ts` (`x-api-key` header) |
+| `SWEEP_SLEEVE_ID` or `SWEEP_POLICY_ID` | `run-sweep-basket`: the sleeve (or comma-separated policy ids, one sleeve) whose subscriptions are the candidates |
+| `SWEEP_WINDOW_DAYS` | `run-sweep-basket`: max days from the basket day to the event close (default 56) |
+| `SWEEP_S` | `run-sweep-basket`: contracts per market (default 1) |
 
 The Kalshi client needs no credentials.
+
+## Sweep basket
+
+`node dist/pipelines/run-sweep-basket.js [--dry-run] [--candidates-from=policy_markets|kalshi_state]`
+
+Daily at 00:30Z: freshness gate on today's `policy_markets_scraper` run → sleeve S's synced
+subscriptions → fine field predicate → tape pull into `sweep_maker.trades` → features and
+rule v1.1 → budget admission → `sweep_maker.basket` → `sweep_basket` push. Exits 1 on a
+stale scrape, a selector tighter than the rule, or a lost push. `--dry-run` reads only
+(the Supabase client refuses non-GET requests), writes new tape rows to a temp file, and
+prints the summary. `--candidates-from=kalshi_state` (dry run only) samples ~300 field legs
+from `kalshi_state` for when the sleeve has no subscriptions yet.
 
 ## Database types
 

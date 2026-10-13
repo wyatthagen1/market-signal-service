@@ -14,6 +14,8 @@ const TRADES_PATH: Record<TradesSource, string> = {
     historical: '/trade-api/v2/historical/trades',
 };
 
+const CUTOFF_PATH = '/trade-api/v2/historical/cutoff';
+
 const PAGE_LIMIT = 1000;
 const REQUEST_TIMEOUT_MS = 20_000;
 
@@ -71,6 +73,14 @@ export class KalshiPublicClient {
             cursor = page.trades.length > 0 ? page.cursor : null;
         } while (cursor);
         return all;
+    }
+
+    /** The boundary below which trades exist only on `historical` (`trades_created_ts`). */
+    async getHistoricalTradesCutoff(): Promise<Date> {
+        const body = (await this.getJson(`${this.baseUrl}${CUTOFF_PATH}`)) as { trades_created_ts?: unknown };
+        const cutoff = typeof body?.trades_created_ts === 'string' ? new Date(body.trades_created_ts) : null;
+        if (!cutoff || Number.isNaN(cutoff.getTime())) throw new Error(`historical cutoff: unexpected body ${JSON.stringify(body).slice(0, 200)}`);
+        return cutoff;
     }
 
     /** GETs JSON, retrying 429/5xx/network errors with exponential backoff (Retry-After honoured). Other statuses throw. */
