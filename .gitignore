@@ -1,0 +1,11 @@
+# Environment
+.env
+
+# No trailing slash: with one, git ignores the directory but not a symlink of the same name
+node_modules
+
+# Local Supabase CLI state
+supabase
+
+# Build output
+dist/
