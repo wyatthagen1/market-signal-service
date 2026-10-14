@@ -19,6 +19,10 @@ export default defineRailway(() => {
             SUPABASE_SERVICE_ROLE_KEY: preserve(),
             SIGNAL_ROUTER_URL: preserve(),
             SIGNAL_ROUTER_API_KEY: preserve(),
+            // Sleeve S doesn't exist yet; set SWEEP_SLEEVE_ID (or SWEEP_POLICY_ID) once it does.
+            SWEEP_SLEEVE_ID: preserve(),
+            SWEEP_WINDOW_DAYS: "56",
+            SWEEP_S: "1",
         },
     });
 
