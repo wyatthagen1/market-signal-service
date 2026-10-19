@@ -90,7 +90,7 @@ export async function runSweepBasket(opts: RunOptions, cfg: SweepConfig, now = n
     log(`kalshi: requests ${kalshi.signed ? `signed with KALSHI_READ_API_KEY_ID ${process.env.KALSHI_READ_API_KEY_ID!.trim().slice(0, 8)}…` : 'unsigned'}`);
 
     try {
-        const problems = checkSelectorParams(await loadSelectorParams(client), cfg.windowDays, (m) => console.warn(`[sweep-basket] WARNING ${m}`));
+        const problems = checkSelectorParams(await loadSelectorParams(client), cfg.windowDays);
         if (problems.length) warnOrThrow(`field_universe selector is not looser than the rule: ${problems.join('; ')}`);
     } catch (err) {
         warnOrThrow(`selector check failed: ${err instanceof Error ? err.message : err}`);

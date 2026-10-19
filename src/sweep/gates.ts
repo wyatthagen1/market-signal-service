@@ -63,12 +63,11 @@ export const SELECTOR_REGEXES: Record<string, RegExp> = {
 /**
  * The coarse universe must be a superset of the rule, or legs the rule would quote are never
  * subscribed, and its sports regexes must be ours. Returns the violations; empty means
- * looser-or-equal on every comparable key. A missing regex key only `warn`s.
+ * looser-or-equal on every comparable key.
  */
 export function checkSelectorParams(
     params: Record<string, unknown> | null,
     windowDays: number,
-    warn: (msg: string) => void = console.warn,
 ): string[] {
     if (!params) return ['no market_filters row with selector = field_universe'];
     const num = (k: string): number | null => (typeof params[k] === 'number' ? (params[k] as number) : null);
@@ -82,8 +81,7 @@ export function checkSelectorParams(
     need('min_close_d', (v) => v <= RULE.minLegCloseDays, `<= ${RULE.minLegCloseDays}`);
     need('min_legs', (v) => v <= RULE.minLegs, `<= ${RULE.minLegs}`);
     for (const [k, re] of Object.entries(SELECTOR_REGEXES)) {
-        // TODO make strict once the migration is live
-        if (params[k] === undefined || params[k] === null) warn(`selector_params.${k} is absent; regex parity unchecked`);
+        if (params[k] === undefined || params[k] === null) problems.push(`selector_params.${k} is absent; the universe would subscribe Sports legs the producer always excludes`);
         else if (params[k] !== re.source) problems.push(`selector_params.${k} differs from the producer's regex ${JSON.stringify(re.source)}`);
     }
     return problems;
