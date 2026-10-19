@@ -19,8 +19,13 @@ export const RULE = {
 
 /** Σ resting notional of the admitted basket may use at most this share of sleeve cash. */
 export const BUDGET_FRACTION = 0.95;
-/** valid_until = basket_date 00:00Z + this. */
+/**
+ * valid_until = basket_date 00:00Z + VALID_FOR_HOURS + a per-ticker offset in
+ * [0, EXPIRY_STAGGER_HOURS). The floor must outlast the next basket's arrival.
+ */
 export const VALID_FOR_HOURS = 26;
+/** Spreads the trader's near-expiry cancel-replaces instead of bursting them at one instant. */
+export const EXPIRY_STAGGER_HOURS = 2;
 
 export const DAY_MS = 86_400_000;
 

@@ -3,19 +3,27 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { BasketDbRow } from './basket';
 import type { CandidateLeg } from './candidates';
-import { BUDGET_FRACTION, VALID_FOR_HOURS } from './config';
+import { BUDGET_FRACTION, EXPIRY_STAGGER_HOURS, VALID_FOR_HOURS } from './config';
 import type { LegFeatures, Side } from './features';
 import type { RuleDecision } from './rule';
 
-export type AdmitExclusion = 'opposite_position' | 'no_cheap_dup' | 'rationed';
+export type AdmitExclusion = 'tape_failed' | 'opposite_position' | 'no_cheap_dup' | 'rationed';
+
+const seededU = (key: string): number => createHash('sha256').update(key).digest().readUIntBE(0, 6) / 2 ** 48;
 
 /**
  * Deterministic uniform in [0, 1) from sha256(`${basketDate}|${ticker}`): the top 48 bits
  * over 2^48, exact in a double. Reproducible in Python with hashlib.
  */
-export function rationU(basketDate: string, ticker: string): number {
-    const digest = createHash('sha256').update(`${basketDate}|${ticker}`).digest();
-    return digest.readUIntBE(0, 6) / 2 ** 48;
+export const rationU = (basketDate: string, ticker: string): number => seededU(`${basketDate}|${ticker}`);
+
+/** As rationU over `expiry|${basketDate}|${ticker}`, so the two draws are independent. */
+export const expiryU = (basketDate: string, ticker: string): number => seededU(`expiry|${basketDate}|${ticker}`);
+
+/** basket_date 00:00Z + 26 h + expiryU × 2 h, floored to the second (Kalshi's expiration_time unit). */
+export function validUntil(basketDate: string, ticker: string): string {
+    const floorS = Date.parse(`${basketDate}T00:00:00Z`) / 1000 + VALID_FOR_HOURS * 3600;
+    return new Date((floorS + Math.floor(expiryU(basketDate, ticker) * EXPIRY_STAGGER_HOURS * 3600)) * 1000).toISOString();
 }
 
 export interface AdmitLeg {
@@ -33,6 +41,8 @@ export interface AdmitInput {
     cashC: number | null;
     /** Contracts per market. */
     s: number;
+    /** Tickers whose tape pull failed today; always excluded. */
+    tapeFailed?: ReadonlySet<string>;
 }
 
 export interface AdmitResult {
@@ -53,6 +63,7 @@ const opposite = (side: Side): Side => (side === 'yes' ? 'no' : 'yes');
 
 /**
  * Budget admission (PRD 1.5, §3.4–3.5). Writes one row per candidate:
+ *   - a ticker in tapeFailed → tape_failed, whatever its stored tape says;
  *   - rule exclusions pass through;
  *   - a leg holding a position on the side opposite quote_side → opposite_position (Kalshi
  *     nets YES/NO, so the bid would sell it);
@@ -64,14 +75,13 @@ const opposite = (side: Side): Side => (side === 'yes' ? 'no' : 'yes');
  *     (rationed). Never by price, edge or any other leg property.
  */
 export function admit(input: AdmitInput): AdmitResult {
-    const { basketDate, positions, cashC, s } = input;
+    const { basketDate, positions, cashC, s, tapeFailed } = input;
     const targetC = s * 100;
-    const validUntil = new Date(Date.parse(`${basketDate}T00:00:00Z`) + VALID_FOR_HOURS * 3_600_000).toISOString();
 
     type Work = { a: AdmitLeg; held: number; u: number; excluded: string | null; unfilledC: number };
     const work: Work[] = input.legs.map((a) => {
         const held = positions.get(a.leg.ticker) ?? 0;
-        let excluded: string | null = a.rule.excluded;
+        let excluded: string | null = tapeFailed?.has(a.leg.ticker) ? 'tape_failed' : a.rule.excluded;
         const side = a.rule.quoteSide;
         if (!excluded && side && heldOn(opposite(side), held) > 0) excluded = 'opposite_position';
         const unfilledC = side ? Math.max(0, targetC - heldOn(side, held)) : 0;
@@ -134,7 +144,7 @@ export function admit(input: AdmitInput): AdmitResult {
             admitted: !w.excluded,
             excluded: w.excluded,
             ration_u: w.u,
-            valid_until: validUntil,
+            valid_until: validUntil(basketDate, leg.ticker),
         };
     });
     const resting = work.filter((w) => !w.excluded && w.unfilledC > 0).length;
