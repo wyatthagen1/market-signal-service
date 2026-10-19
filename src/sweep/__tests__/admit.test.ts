@@ -1,4 +1,4 @@
-import { admit, AdmitLeg, rationU } from '../admit';
+import { admit, AdmitLeg, expiryU, rationU, validUntil } from '../admit';
 import { SweepBasketRowSchema, toStoreRow } from '../basket';
 import { CandidateLeg } from '../candidates';
 import { LegFeatures, Side } from '../features';
@@ -35,7 +35,7 @@ describe('admit', () => {
         expect(r.usedC).toBeLessThanOrEqual(r.budgetC!);
         expect(r.resting).toBe(40);
         for (const row of r.rows) {
-            expect(row).toMatchObject({ count_c: 100, sleeve_cash_c: 100_000, valid_until: '2026-10-15T02:00:00.000Z', held_c: 0 });
+            expect(row).toMatchObject({ count_c: 100, sleeve_cash_c: 100_000, valid_until: validUntil(DATE, row.ticker), held_c: 0 });
             expect(SweepBasketRowSchema.safeParse(toStoreRow(row)).success).toBe(true);
         }
     });
@@ -128,5 +128,46 @@ describe('admit', () => {
         expect(r.rows[0]).toMatchObject({ admitted: false, excluded: 'thin', quote_price_c: 76 });
         expect(r.budgetC).toBeNull();
         expect(r.rows.filter((x) => x.admitted)).toHaveLength(5);
+    });
+
+    it('a tape_failed ticker is excluded whatever its stored tape says, and reserves nothing', () => {
+        const input = legs(5);
+        const r = admit({ basketDate: DATE, legs: input, positions: new Map(), cashC: 100_000, s: 1, tapeFailed: new Set(['KXT-2']) });
+        expect(r.rows.find((x) => x.ticker === 'KXT-2')).toMatchObject({ admitted: false, excluded: 'tape_failed' });
+        expect(r.rows.filter((x) => x.admitted)).toHaveLength(4);
+        expect(r.resting).toBe(4);
+        expect(r.usedC).toBe(reserved(r.rows));
+    });
+});
+
+describe('valid_until stagger', () => {
+    const floor = Date.parse('2026-10-15T02:00:00Z');
+    const tickers = Array.from({ length: 2000 }, (_, i) => `KXT-${i}`);
+
+    it('expiryU is sha256-seeded on its own salt and matches the Python reference', () => {
+        expect(expiryU('2026-10-14', 'KXTEST-A')).toBe(0.5968244419441113);
+        expect(expiryU('2026-10-14', 'KXNBATEAM-26-LBJ')).toBe(0.7282345517000941);
+        expect(expiryU(DATE, 'KXTEST-A')).not.toBe(rationU(DATE, 'KXTEST-A'));
+    });
+
+    it('lands in [basket_date + 26 h, + 28 h) on whole seconds, never below the floor', () => {
+        const ms = tickers.map((t) => Date.parse(validUntil(DATE, t)));
+        expect(Math.min(...ms)).toBeGreaterThanOrEqual(floor);
+        expect(Math.max(...ms)).toBeLessThan(floor + 2 * 3_600_000);
+        expect(ms.every((x) => x % 1000 === 0)).toBe(true);
+        expect(validUntil(DATE, 'KXTEST-A')).toBe(new Date(floor + Math.floor(0.5968244419441113 * 7200) * 1000).toISOString());
+    });
+
+    it('is reproducible, spread across the window, and independent of ration_u', () => {
+        expect(tickers.map((t) => validUntil(DATE, t))).toEqual(tickers.map((t) => validUntil(DATE, t)));
+        const quarters = [0, 0, 0, 0];
+        for (const t of tickers) quarters[Math.floor(expiryU(DATE, t) * 4)]++;
+        for (const q of quarters) expect(q).toBeGreaterThan(400);
+        const n = tickers.length;
+        const [x, y] = [tickers.map((t) => rationU(DATE, t)), tickers.map((t) => expiryU(DATE, t))];
+        const mean = (v: number[]) => v.reduce((a, b) => a + b, 0) / n;
+        const [mx, my] = [mean(x), mean(y)];
+        const cov = x.reduce((s, xi, i) => s + (xi - mx) * (y[i] - my), 0) / n;
+        expect(Math.abs(cov / (1 / 12))).toBeLessThan(0.1);
     });
 });

@@ -1,7 +1,7 @@
 import { readOnlyFetch } from '../../db/client';
-import type { TradesQuery } from '../../kalshi/public-client';
+import { KalshiClientError, KalshiRetriesExhaustedError, type TradesQuery } from '../../kalshi/public-client';
 import type { Trade } from '../../kalshi/trades';
-import { pullTape, TradeRow, TradesSourceLike } from '../tape';
+import { pullTape, tapeFailureExceeded, TradeRow, TradesSourceLike } from '../tape';
 
 const START = new Date('2026-10-14T00:00:00Z');
 const DAY = 86_400_000;
@@ -71,6 +71,55 @@ describe('pullTape', () => {
             { ticker: 'A', minTs: (START.getTime() - 14 * DAY) / 1000, maxTs: cutoff.getTime() / 1000, source: 'historical' },
         ]);
         expect(r.prints.get('A')!.map((p) => p.tradeId).sort()).toEqual(['o1', 'r1']);
+    });
+
+    it('a ticker whose pull exhausts its retries fails alone, keeping only its stored prints', async () => {
+        const a1 = trade('a1', 'A', START.getTime() - DAY);
+        const c1 = trade('c1', 'C', START.getTime() - DAY);
+        const b0 = trade('b0', 'B', START.getTime() - 2 * DAY);
+        const src = source({ A: [a1], C: [c1] }, new Date(START.getTime() - 60 * DAY));
+        const inner = src.fetchTrades;
+        src.fetchTrades = async (q) => {
+            if (q.ticker === 'B') throw new KalshiRetriesExhaustedError('429 after 5 attempts');
+            return inner(q);
+        };
+        const store = { readSince: async () => new Map([['B', [row(b0)]]]) };
+
+        const r = await pullTape({ tickers: ['A', 'B', 'C'], dayStart: START, store, source: src, concurrency: 1, log: silent });
+
+        expect(r.failed).toEqual(['B']);
+        expect(r.newRows.map((x) => x.trade_id).sort()).toEqual(['a1', 'c1']);
+        expect(r.prints.get('B')!.map((p) => p.tradeId)).toEqual(['b0']);
+    });
+
+    it('a historical-path failure fails the ticker too', async () => {
+        const src = source({ A: [] }, new Date(START.getTime() - 5 * DAY));
+        src.fetchTrades = async (q) => {
+            if (q.source === 'historical') throw new KalshiRetriesExhaustedError('503');
+            return [];
+        };
+        const r = await pullTape({ tickers: ['A'], dayStart: START, store: { readSince: async () => new Map() }, source: src, log: silent });
+        expect(r.failed).toEqual(['A']);
+    });
+
+    it('a 4xx or any other error rejects the pull and stops taking tickers', async () => {
+        const src = source({}, new Date(START.getTime() - 60 * DAY));
+        const seen: string[] = [];
+        src.fetchTrades = async (q) => {
+            seen.push(q.ticker!);
+            if (q.ticker === 'B') throw new KalshiClientError(401, 'unauthorized');
+            return [];
+        };
+        const tickers = ['A', 'B', 'C', 'D', 'E'];
+        await expect(pullTape({ tickers, dayStart: START, store: { readSince: async () => new Map() }, source: src, concurrency: 1, log: silent }))
+            .rejects.toThrow(KalshiClientError);
+        expect(seen).toEqual(['A', 'B']);
+    });
+
+    it('the abort threshold is strictly more than 10% of candidates', () => {
+        expect(tapeFailureExceeded(10, 100)).toBe(false);
+        expect(tapeFailureExceeded(11, 100)).toBe(true);
+        expect(tapeFailureExceeded(0, 0)).toBe(false);
     });
 });
 

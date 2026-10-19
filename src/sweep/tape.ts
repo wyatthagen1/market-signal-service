@@ -1,7 +1,7 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { chunk, IN_CHUNK, selectAll } from '../db/paged';
-import type { TradesQuery } from '../kalshi/public-client';
+import { KalshiRetriesExhaustedError, type TradesQuery } from '../kalshi/public-client';
 import type { Trade } from '../kalshi/trades';
 import { DAY_MS, RULE } from './config';
 import type { Print } from './features';
@@ -91,13 +91,30 @@ export interface TapeResult {
     /** Tickers with nothing stored in the window (14-day backfill). */
     backfilled: number;
     historicalFetches: number;
+    /** Tickers whose pull exhausted its retries; their prints are the stored ones only. */
+    failed: string[];
     elapsedMs: number;
 }
 
+/** The run aborts when more than this share of candidate tickers end tape_failed. */
+export const MAX_TAPE_FAILED_FRACTION = 0.1;
+
+export const tapeFailureExceeded = (failed: number, total: number): boolean =>
+    total > 0 && failed / total > MAX_TAPE_FAILED_FRACTION;
+
+/** Runs `fn` over `items`; the first rejection stops every worker from taking another item. */
 async function pool<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
     let next = 0;
+    let stopped = false;
     const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-        while (next < items.length) await fn(items[next++]);
+        while (!stopped && next < items.length) {
+            try {
+                await fn(items[next++]);
+            } catch (err) {
+                stopped = true;
+                throw err;
+            }
+        }
     });
     await Promise.all(workers);
 }
@@ -109,6 +126,10 @@ async function pool<T>(items: T[], concurrency: number, fn: (item: T) => Promise
  * reaching below Kalshi's historical cutoff also reads /historical/trades up to the cutoff,
  * because the live endpoint returns nothing for older trades. Requests go through the
  * source's shared pacer; `concurrency` only overlaps their latency.
+ *
+ * A ticker whose pull exhausts its retries (429 / 5xx / network) is recorded in `failed`,
+ * keeps only its stored prints, and contributes no new rows. Any other error (a non-429 4xx
+ * is auth or config) rejects the whole pull.
  */
 export async function pullTape({
     tickers, dayStart, store, source, concurrency = 4, log = console.log,
@@ -126,6 +147,7 @@ export async function pullTape({
     const cutoff = await source.getHistoricalTradesCutoff();
     const prints = new Map<string, Print[]>();
     const newRows: TradeRow[] = [];
+    const failed: string[] = [];
     let backfilled = 0, historicalFetches = 0, done = 0;
 
     await pool(tickers, concurrency, async (ticker) => {
@@ -135,11 +157,19 @@ export async function pullTape({
         const watermark = have.reduce((m, r) => Math.max(m, Date.parse(r.created_at)), windowStart.getTime());
         const minTs = Math.floor(watermark / 1000);
         const fetched: Trade[] = [];
-        if (watermark < cutoff.getTime()) {
-            historicalFetches++;
-            fetched.push(...await source.fetchTrades({ ticker, minTs, maxTs: Math.ceil(cutoff.getTime() / 1000), source: 'historical' }));
+        try {
+            if (watermark < cutoff.getTime()) {
+                historicalFetches++;
+                fetched.push(...await source.fetchTrades({ ticker, minTs, maxTs: Math.ceil(cutoff.getTime() / 1000), source: 'historical' }));
+            }
+            fetched.push(...await source.fetchTrades({ ticker, minTs, source: 'live' }));
+        } catch (err) {
+            if (!(err instanceof KalshiRetriesExhaustedError)) throw err;
+            failed.push(ticker);
+            prints.set(ticker, have.map(rowToPrint));
+            log(`tape: ${ticker} failed: ${err.message}`);
+            return;
         }
-        fetched.push(...await source.fetchTrades({ ticker, minTs, source: 'live' }));
         const fresh: TradeRow[] = [];
         for (const t of fetched) {
             if (ids.has(t.tradeId)) continue;
@@ -151,5 +181,5 @@ export async function pullTape({
         if (++done % 100 === 0) log(`tape: ${done}/${tickers.length} tickers, ${newRows.length} new prints`);
     });
 
-    return { prints, newRows, backfilled, historicalFetches, elapsedMs: Date.now() - t0 };
+    return { prints, newRows, backfilled, historicalFetches, failed, elapsedMs: Date.now() - t0 };
 }

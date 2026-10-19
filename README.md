@@ -26,6 +26,7 @@ tables, and pushes a store to the trading fleet through the signal router.
 | `SWEEP_SLEEVE_ID` or `SWEEP_POLICY_ID` | `run-sweep-basket`: the sleeve (or comma-separated policy ids, one sleeve) whose subscriptions are the candidates |
 | `SWEEP_WINDOW_DAYS` | `run-sweep-basket`: max days from the basket day to the event close (default 56) |
 | `SWEEP_S` | `run-sweep-basket`: contracts per market (default 1) |
+| `KALSHI_READ_API_KEY_ID` + `KALSHI_READ_PRIVATE_KEY_PEM` (or `_BASE64`) | optional: sign Kalshi tape requests with a dedicated read key (never the trader's); unsigned when either is unset |
 
 The Kalshi client needs no credentials.
 

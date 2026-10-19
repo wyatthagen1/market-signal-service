@@ -4,7 +4,7 @@ import { join } from 'path';
 import { SupabaseClient } from '@supabase/supabase-js';
 import { getSupabase, useReadOnlySupabase } from '../db/client';
 import { chunk, selectAll } from '../db/paged';
-import { KalshiPublicClient } from '../kalshi/public-client';
+import { KalshiPublicClient, loadReadAuthFromEnv } from '../kalshi/public-client';
 import { postSignal } from '../router/post-signal';
 import { admit, AdmitLeg, dayStartOf, loadSleeveCash, utcDate } from '../sweep/admit';
 import { BasketDbRow, SweepBasketRow, toStoreRow } from '../sweep/basket';
@@ -14,7 +14,7 @@ import { computeFeatures } from '../sweep/features';
 import { checkFreshness, checkSelectorParams, loadScraperLogs, loadSelectorParams, resolvePolicies } from '../sweep/gates';
 import { loadPositions } from '../sweep/positions';
 import { applyRule } from '../sweep/rule';
-import { pullTape, SupabaseTapeStore, TapeStore, TradeRow } from '../sweep/tape';
+import { MAX_TAPE_FAILED_FRACTION, pullTape, SupabaseTapeStore, tapeFailureExceeded, TapeStore, TradeRow } from '../sweep/tape';
 
 /** Rows per router push; the router's body limit is 10 MB, the trader accumulates same-date pushes. */
 export const PUSH_CHUNK = 500;
@@ -86,9 +86,11 @@ export async function runSweepBasket(opts: RunOptions, cfg: SweepConfig, now = n
     const basketDate = utcDate(now);
     const dayStart = dayStartOf(basketDate);
     log(`basket ${basketDate}${opts.dryRun ? ' (dry run)' : ''}: window ${cfg.windowDays} d, S = ${cfg.s}, candidates from ${opts.candidatesFrom}`);
+    const kalshi = new KalshiPublicClient({ auth: loadReadAuthFromEnv(process.env) });
+    log(`kalshi: requests ${kalshi.signed ? `signed with KALSHI_READ_API_KEY_ID ${process.env.KALSHI_READ_API_KEY_ID!.trim().slice(0, 8)}…` : 'unsigned'}`);
 
     try {
-        const problems = checkSelectorParams(await loadSelectorParams(client), cfg.windowDays);
+        const problems = checkSelectorParams(await loadSelectorParams(client), cfg.windowDays, (m) => console.warn(`[sweep-basket] WARNING ${m}`));
         if (problems.length) warnOrThrow(`field_universe selector is not looser than the rule: ${problems.join('; ')}`);
     } catch (err) {
         warnOrThrow(`selector check failed: ${err instanceof Error ? err.message : err}`);
@@ -138,8 +140,10 @@ export async function runSweepBasket(opts: RunOptions, cfg: SweepConfig, now = n
             insert: async () => { throw new Error('dry run never writes the tape'); },
         };
     }
-    const tape = await pullTape({ tickers: legs.map((l) => l.ticker), dayStart, store, source: new KalshiPublicClient(), log });
-    log(`tape: ${tape.newRows.length} new prints, ${tape.backfilled} backfilled, ${tape.historicalFetches} historical reads, ${Math.round(tape.elapsedMs / 1000)} s`);
+    const tape = await pullTape({ tickers: legs.map((l) => l.ticker), dayStart, store, source: kalshi, log });
+    log(`tape: ${tape.newRows.length} new prints, ${tape.backfilled} backfilled, ${tape.historicalFetches} historical reads, ` +
+        `${tape.failed.length} failed, ${Math.round(tape.elapsedMs / 1000)} s`);
+    if (tape.failed.length) log(`tape failed: ${tape.failed.slice(0, 20).join(' ')}${tape.failed.length > 20 ? ' …' : ''}`);
     if (opts.dryRun) {
         const path = join(tmpdir(), `sweep-tape-${basketDate}-${process.pid}.jsonl`);
         writeFileSync(path, tape.newRows.map((r: TradeRow) => JSON.stringify(r)).join('\n'));
@@ -151,6 +155,10 @@ export async function runSweepBasket(opts: RunOptions, cfg: SweepConfig, now = n
             // Features use the in-memory tape, and the next run re-pulls from the stored watermark.
             console.error(`[sweep-basket] ERROR tape insert failed, continuing: ${err instanceof Error ? err.message : err}`);
         }
+    }
+
+    if (tapeFailureExceeded(tape.failed.length, legs.length)) {
+        warnOrThrow(`tape failed for ${tape.failed.length} of ${legs.length} tickers (> ${MAX_TAPE_FAILED_FRACTION * 100}%)`);
     }
 
     const admitLegs: AdmitLeg[] = legs.map((leg) => {
@@ -167,7 +175,7 @@ export async function runSweepBasket(opts: RunOptions, cfg: SweepConfig, now = n
         log('no sleeve configured: budget check skipped');
     }
     const positions = await loadPositions(client, policyIds, legs.map((l) => l.ticker));
-    const result = admit({ basketDate, legs: admitLegs, positions, cashC, s: cfg.s });
+    const result = admit({ basketDate, legs: admitLegs, positions, cashC, s: cfg.s, tapeFailed: new Set(tape.failed) });
     if (result.rationed > 0) {
         console.error(`[sweep-basket] ALARM rationed ${result.rationed} legs: demand ${(result.demandC / 100).toFixed(2)} USD > budget ${((result.budgetC ?? 0) / 100).toFixed(2)} USD (0.95 × cash). Fund the sleeve or lower S.`);
     }
@@ -189,7 +197,7 @@ export async function runSweepBasket(opts: RunOptions, cfg: SweepConfig, now = n
 
     const budget = result.budgetC === null ? 'n/a' : `${(result.budgetC / 100).toFixed(2)} USD`;
     log(`SUMMARY ${basketDate}${opts.dryRun ? ' DRY RUN (nothing written or pushed)' : ''}: subscribed ${subscribed}, ` +
-        `candidates ${legs.length}, admitted ${admitted.length} (${result.resting} resting), rationed ${result.rationed}, ` +
+        `candidates ${legs.length}, admitted ${admitted.length} (${result.resting} resting), rationed ${result.rationed}, tape_failed=${tape.failed.length}, ` +
         `budget used ${(result.usedC / 100).toFixed(2)} of ${budget}`);
 }
 

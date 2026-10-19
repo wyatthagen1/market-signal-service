@@ -1,5 +1,6 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
+import { SINGLE_EVENT_PROP, SPORTS_CONTEST } from './candidates';
 import { RULE } from './config';
 
 export const SCRAPER_PROCESS = 'policy_markets_scraper';
@@ -53,11 +54,22 @@ export async function loadScraperLogs(client: SupabaseClient, since: Date): Prom
     return z.array(ScraperLogSchema).parse(data ?? []);
 }
 
+/** selector_params keys the trader's selector compiles; each must equal our regex's `.source` byte for byte. */
+export const SELECTOR_REGEXES: Record<string, RegExp> = {
+    sports_contest_re: SPORTS_CONTEST,
+    sports_single_event_prop_re: SINGLE_EVENT_PROP,
+};
+
 /**
  * The coarse universe must be a superset of the rule, or legs the rule would quote are never
- * subscribed. Returns the violations; empty means looser-or-equal on every comparable key.
+ * subscribed, and its sports regexes must be ours. Returns the violations; empty means
+ * looser-or-equal on every comparable key. A missing regex key only `warn`s.
  */
-export function checkSelectorParams(params: Record<string, unknown> | null, windowDays: number): string[] {
+export function checkSelectorParams(
+    params: Record<string, unknown> | null,
+    windowDays: number,
+    warn: (msg: string) => void = console.warn,
+): string[] {
     if (!params) return ['no market_filters row with selector = field_universe'];
     const num = (k: string): number | null => (typeof params[k] === 'number' ? (params[k] as number) : null);
     const problems: string[] = [];
@@ -69,6 +81,11 @@ export function checkSelectorParams(params: Record<string, unknown> | null, wind
     need('max_event_close_d', (v) => v >= windowDays, `>= ${windowDays} (SWEEP_WINDOW_DAYS)`);
     need('min_close_d', (v) => v <= RULE.minLegCloseDays, `<= ${RULE.minLegCloseDays}`);
     need('min_legs', (v) => v <= RULE.minLegs, `<= ${RULE.minLegs}`);
+    for (const [k, re] of Object.entries(SELECTOR_REGEXES)) {
+        // TODO make strict once the migration is live
+        if (params[k] === undefined || params[k] === null) warn(`selector_params.${k} is absent; regex parity unchecked`);
+        else if (params[k] !== re.source) problems.push(`selector_params.${k} differs from the producer's regex ${JSON.stringify(re.source)}`);
+    }
     return problems;
 }
 
