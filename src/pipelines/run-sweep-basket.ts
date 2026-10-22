@@ -5,6 +5,7 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import { getSupabase, useReadOnlySupabase } from '../db/client';
 import { chunk, selectAll } from '../db/paged';
 import { KalshiPublicClient, loadReadAuthFromEnv } from '../kalshi/public-client';
+import { TraceInput } from '../db/signal-pushes';
 import { postSignal } from '../router/post-signal';
 import { admit, AdmitLeg, dayStartOf, loadSleeveCash, utcDate } from '../sweep/admit';
 import { BasketDbRow, SweepBasketRow, toStoreRow } from '../sweep/basket';
@@ -44,9 +45,13 @@ export function parseArgs(argv: string[]): RunOptions {
     return opts;
 }
 
-/** Pushes admitted rows in chunks; each chunk gets postSignal's retries, and any failure throws. */
-export async function pushBasket(rows: SweepBasketRow[], post: typeof postSignal = postSignal): Promise<void> {
-    for (const part of chunk(rows, PUSH_CHUNK)) await post('sweep_basket', part);
+/** Pushes admitted rows in chunks, one trace per chunk; each chunk gets postSignal's retries, and any failure throws. */
+export async function pushBasket(
+    rows: SweepBasketRow[],
+    trace: { inputs: TraceInput[]; builtAt: Date },
+    post: typeof postSignal = postSignal,
+): Promise<void> {
+    for (const part of chunk(rows, PUSH_CHUNK)) await post('sweep_basket', part, { producer: 'sweep-basket', ...trace });
 }
 
 /**
@@ -141,6 +146,7 @@ export async function runSweepBasket(opts: RunOptions, cfg: SweepConfig, now = n
         };
     }
     const tape = await pullTape({ tickers: legs.map((l) => l.ticker), dayStart, store, source: kalshi, log });
+    const tapeReceivedAt = new Date();
     log(`tape: ${tape.newRows.length} new prints, ${tape.backfilled} backfilled, ${tape.historicalFetches} historical reads, ` +
         `${tape.failed.length} failed, ${Math.round(tape.elapsedMs / 1000)} s`);
     if (tape.failed.length) log(`tape failed: ${tape.failed.slice(0, 20).join(' ')}${tape.failed.length > 20 ? ' …' : ''}`);
@@ -176,6 +182,7 @@ export async function runSweepBasket(opts: RunOptions, cfg: SweepConfig, now = n
     }
     const positions = await loadPositions(client, policyIds, legs.map((l) => l.ticker));
     const result = admit({ basketDate, legs: admitLegs, positions, cashC, s: cfg.s, tapeFailed: new Set(tape.failed) });
+    const builtAt = new Date();
     if (result.rationed > 0) {
         console.error(`[sweep-basket] ALARM rationed ${result.rationed} legs: demand ${(result.demandC / 100).toFixed(2)} USD > budget ${((result.budgetC ?? 0) / 100).toFixed(2)} USD (0.95 × cash). Fund the sleeve or lower S.`);
     }
@@ -192,7 +199,8 @@ export async function runSweepBasket(opts: RunOptions, cfg: SweepConfig, now = n
         }
     } else {
         await writeBasket(client, basketDate, result.rows);
-        await pushBasket(storeRows);
+        // The basket's market input is the day's tape (sweep_maker.trades); its newest prints are the origin time.
+        await pushBasket(storeRows, { builtAt, inputs: [{ source: 'kalshi_tape', ref: basketDate, received_at: tapeReceivedAt.toISOString() }] });
     }
 
     const budget = result.budgetC === null ? 'n/a' : `${(result.budgetC / 100).toFixed(2)} USD`;
